@@ -22,7 +22,7 @@ import tempfile
 import urllib.request
 import zipfile
 
-PATCHER_VERSION = "1.2.1"
+PATCHER_VERSION = "1.3.0"
 
 
 def base_dir():
@@ -148,6 +148,39 @@ def download(url, target, what):
     print()
 
 
+def github_problem(url, error):
+    """Explain a failed GitHub request in plain words: what failed, what the player checks by hand."""
+    host = url.split("/")[2] if "://" in url else url
+    reason = getattr(error, "reason", None) or error
+    text = str(reason)
+    if getattr(error, "code", None) in (403, 429):
+        why = "GitHub тимчасово обмежив запити з вашої адреси (ліміт). Зачекайте годину або спробуйте іншу мережу / VPN."
+    elif "CERTIFICATE" in text.upper() or "SSL" in text.upper():
+        why = ("Захищене з'єднання з GitHub не вдалося перевірити. Перевірте дату й час на комп'ютері; "
+               "антивірус або проксі можуть підміняти сертифікати.")
+    elif "timed out" in text or "getaddrinfo" in text or "11001" in text or "10060" in text or "10061" in text:
+        why = "GitHub не відповідає: його блокує мережа, провайдер, антивірус або брандмауер, або немає інтернету."
+    else:
+        why = "З'єднання з GitHub не вдалося."
+    return (f"НЕМАЄ ДОСТУПУ ДО GITHUB ({host}).\n  Причина: {text}\n  {why}\n"
+            f"  Перевірте вручну: відкрийте в браузері цю адресу:\n    {url}")
+
+
+def ask_local_archive(url):
+    """The player downloaded the translation archive by hand: ask where it is. Returns the path or None."""
+    print("\nЯкщо в браузері файл завантажився, вкажіть шлях до нього (можна перетягнути файл у це вікно).")
+    while True:
+        try:
+            answer = input("Шлях до завантаженого .zip (Enter = вийти): ").strip().strip('"')
+        except EOFError:
+            return None
+        if not answer:
+            return None
+        if os.path.isfile(answer) and zipfile.is_zipfile(answer):
+            return answer
+        print(f"Це не архів .zip або файлу немає: {answer}. Потрібен файл, завантажений з адреси {url}")
+
+
 def fetch_translation(config, work):
     """Return the folder with ``files/`` and ``manifest.json`` from the repository (no other source exists)."""
     head = head_commit(config)
@@ -157,12 +190,18 @@ def fetch_translation(config, work):
         print("Переклад уже завантажено раніше (кеш тієї самої версії).")
         source = cached
     else:
-        source = os.path.join(work, "translation.zip")
+        source, url = os.path.join(work, "translation.zip"), archive_url(config)
         try:
-            download(archive_url(config), source, "перекладу")
+            download(url, source, "перекладу")
+            if not zipfile.is_zipfile(source):
+                raise OSError("завантажений файл не є архівом .zip")
         except OSError as error:
-            raise Fail("Не вдалося завантажити переклад з GitHub "
-                       f"({error}). Перевірте з'єднання з інтернетом і запустіть патчер ще раз.")
+            print("\n" + github_problem(url, error))
+            source, head = ask_local_archive(url), None
+            if not source:
+                raise Fail("Переклад не завантажено: немає доступу до GitHub. Відкрийте в браузері адресу\n  "
+                           f"{url}\nі збережіть файл. Потім запустіть патчер ще раз і вкажіть шлях до файлу.")
+            print(f"Використовую завантажений вручну архів: {source}")
         if head:   # keep this one copy for the case when GitHub cannot be read next time
             os.makedirs(cache, exist_ok=True)
             shutil.copyfile(source, cached)
@@ -600,8 +639,8 @@ def check_self_update(config):
     url = config.get("patcher_url") or raw_url(config)
     try:
         text = fetch_text(url)
-    except (OSError, ValueError):
-        print("Перевірка оновлень патчера пропущена (немає з'єднання з GitHub).")
+    except (OSError, ValueError) as error:
+        print(f"Перевірка оновлень патчера пропущена: немає доступу до GitHub ({getattr(error, 'reason', error)}).")
         return None
     found = re.search(r'^PATCHER_VERSION\s*=\s*"([^"]+)"', text, re.M)
     if not found:
@@ -670,8 +709,8 @@ def check_exe_update(config, argv):
     try:
         info = json.loads(fetch_text(config["exe_info_url"]))
         remote_sha = str(info["sha256"]).lower()
-    except (OSError, ValueError, KeyError):
-        print("Перевірка нового .exe пропущена (немає з'єднання з GitHub).")
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Перевірка нового .exe пропущена: немає доступу до GitHub ({getattr(error, 'reason', error)}).")
         return False
     if sha256_file(exe) == remote_sha:
         return False
